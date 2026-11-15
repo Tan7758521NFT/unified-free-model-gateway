@@ -992,6 +992,12 @@ function sseLine(payload: string): string {
   return `data: ${payload}\n\n`;
 }
 
+// Anthropic SSE frames carry an event name line; without it the client's
+// stream parser rejects the frame outright.
+function anthropicSseLine(type: string, payload: string): string {
+  return `event: ${type}\n${sseLine(payload)}`;
+}
+
 function openAiSseToAnthropic(text: string, modelId: string): string {
   let fullText = '';
   const toolCalls: Array<{ id: string; name: string; args: string }> = [];
@@ -1032,7 +1038,8 @@ function openAiSseToAnthropic(text: string, modelId: string): string {
   const stop = anthropicStop(finish);
   const events: string[] = [];
   events.push(
-    sseLine(
+    anthropicSseLine(
+      'message_start',
       JSON.stringify({
         type: 'message_start',
         message: { id: 'msg_chatcmpl-sim', type: 'message', role: 'assistant', model: modelId, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: promptTokens, output_tokens: 0 } },
@@ -1041,19 +1048,19 @@ function openAiSseToAnthropic(text: string, modelId: string): string {
   );
   let blockIndex = 0;
   if (fullText !== '') {
-    events.push(sseLine(JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' } })));
-    events.push(sseLine(JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: fullText } })));
-    events.push(sseLine(JSON.stringify({ type: 'content_block_stop', index: blockIndex })));
+    events.push(anthropicSseLine('content_block_start', JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' } })));
+    events.push(anthropicSseLine('content_block_delta', JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: fullText } })));
+    events.push(anthropicSseLine('content_block_stop', JSON.stringify({ type: 'content_block_stop', index: blockIndex })));
     blockIndex += 1;
   }
   for (const tc of toolCalls) {
-    events.push(sseLine(JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: {} } })));
-    if (tc.args !== '') events.push(sseLine(JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: tc.args } })));
-    events.push(sseLine(JSON.stringify({ type: 'content_block_stop', index: blockIndex })));
+    events.push(anthropicSseLine('content_block_start', JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: {} } })));
+    if (tc.args !== '') events.push(anthropicSseLine('content_block_delta', JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: tc.args } })));
+    events.push(anthropicSseLine('content_block_stop', JSON.stringify({ type: 'content_block_stop', index: blockIndex })));
     blockIndex += 1;
   }
-  events.push(sseLine(JSON.stringify({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: completionTokens } })));
-  events.push(sseLine(JSON.stringify({ type: 'message_stop' })));
+  events.push(anthropicSseLine('message_delta', JSON.stringify({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: completionTokens } })));
+  events.push(anthropicSseLine('message_stop', JSON.stringify({ type: 'message_stop' })));
   return events.join('');
 }
 
@@ -1173,7 +1180,8 @@ function geminiSseToAnthropic(text: string, modelId: string): string {
   const stop = finish === 'MAX_TOKENS' ? 'max_tokens' : finish === 'SAFETY' ? 'refusal' : 'end_turn';
   const events: string[] = [];
   events.push(
-    sseLine(
+    anthropicSseLine(
+      'message_start',
       JSON.stringify({
         type: 'message_start',
         message: { id: 'msg_gemini-sim', type: 'message', role: 'assistant', model: modelId, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: promptTokens, output_tokens: 0 } },
@@ -1181,12 +1189,12 @@ function geminiSseToAnthropic(text: string, modelId: string): string {
     ),
   );
   if (fullText !== '') {
-    events.push(sseLine(JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })));
-    events.push(sseLine(JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: fullText } })));
-    events.push(sseLine(JSON.stringify({ type: 'content_block_stop', index: 0 })));
+    events.push(anthropicSseLine('content_block_start', JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })));
+    events.push(anthropicSseLine('content_block_delta', JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: fullText } })));
+    events.push(anthropicSseLine('content_block_stop', JSON.stringify({ type: 'content_block_stop', index: 0 })));
   }
-  events.push(sseLine(JSON.stringify({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: completionTokens } })));
-  events.push(sseLine(JSON.stringify({ type: 'message_stop' })));
+  events.push(anthropicSseLine('message_delta', JSON.stringify({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: completionTokens } })));
+  events.push(anthropicSseLine('message_stop', JSON.stringify({ type: 'message_stop' })));
   return events.join('');
 }
 
@@ -1214,7 +1222,7 @@ function upstreamRequest(clientApi: ClientApi, body: JsonObj, candidate: Candida
   const wire = candidate.provider.wire;
   const stream = body.stream === true;
   if (wire === 'openai') {
-    const out: JsonObj = { ...body, model };
+    const out: JsonObj = clientApi === 'openai' ? { ...body, model } : anthropicToOpenAi(body, model);
     if (stream) out.stream_options = { ...OPENAI_STREAM_USAGE };
     return { path: '/v1/chat/completions', body: out };
   }
